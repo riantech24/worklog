@@ -26,14 +26,31 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             credentials: { email: { label: "Email", type: "email" } },
             async authorize(raw) {
               const parsed = devLoginSchema.safeParse(raw);
-              if (!parsed.success) return null;
+              if (!parsed.success) {
+                console.error(
+                  "[dev-login] rejected: invalid email —",
+                  parsed.error.flatten().fieldErrors,
+                );
+                return null;
+              }
+
               const email = parsed.data.email.toLowerCase();
-              const user = await db.user.upsert({
-                where: { email },
-                update: {},
-                create: { email, name: email.split("@")[0] },
-              });
-              return { id: user.id, email: user.email, name: user.name, image: user.image };
+
+              try {
+                const user = await db.user.upsert({
+                  where: { email },
+                  update: {},
+                  create: { email, name: email.split("@")[0] },
+                });
+                return { id: user.id, email: user.email, name: user.name, image: user.image };
+              } catch (error) {
+                // Auth.js swallows this into a generic CallbackRouteError on
+                // screen — the real cause (bad DATABASE_URL, DB not running,
+                // migrations not applied) only shows up here, in the server
+                // terminal.
+                console.error("[dev-login] database error during upsert:", error);
+                return null;
+              }
             },
           }),
         ]
