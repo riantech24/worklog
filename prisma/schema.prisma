@@ -1,0 +1,601 @@
+// WORKLOG — database schema
+// Covers every entity listed in the build specification (§41, §42) so that
+// later phases add features, not destructive migrations.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Auth.js core models
+// ---------------------------------------------------------------------------
+
+model User {
+  id         String    @id @default(cuid())
+  name       String?
+  email      String    @unique
+  emailVerified DateTime?
+  image      String?
+
+  // Profile (§51)
+  jobTitle   String?
+  phone      String?
+  address    String?
+  timezone   String    @default("Asia/Jakarta")
+  currency   String    @default("IDR")
+  locale     String    @default("en")
+  dateFormat String    @default("dd MMM yyyy")
+  timeFormat String    @default("24h")
+  theme      String    @default("system")
+  accentColor String?
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  accounts          Account[]
+  sessions          Session[]
+  googleConnections GoogleConnection[]
+  calendars         Calendar[]
+  calendarEvents    CalendarEvent[]
+  clients           Client[]
+  projects          Project[]
+  workEntries       WorkEntry[]
+  invoices          Invoice[]
+  timesheets        Timesheet[]
+  serviceLogs       ServiceLog[]
+  notifications     Notification[]
+  settings          Setting[]
+  auditLogs         AuditLog[]
+  invoiceTemplates  InvoiceTemplate[]
+}
+
+// OAuth tokens live here (Auth.js adapter contract). Google Calendar in Phase 4
+// reads access_token / refresh_token / expires_at / scope from this row.
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ---------------------------------------------------------------------------
+// Google Calendar (§8, §44)
+// ---------------------------------------------------------------------------
+
+enum ConnectionStatus {
+  CONNECTED
+  NEEDS_REFRESH
+  DISCONNECTED
+}
+
+model GoogleConnection {
+  id             String           @id @default(cuid())
+  userId         String
+  googleAccountId String
+  email          String
+  scope          String?
+  status         ConnectionStatus @default(CONNECTED)
+  lastSyncedAt   DateTime?
+  syncToken      String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  calendars Calendar[]
+
+  @@unique([userId, googleAccountId])
+}
+
+model Calendar {
+  id                 String   @id @default(cuid())
+  userId             String
+  googleConnectionId String?
+  googleCalendarId   String
+  name               String
+  description        String?
+  timezone           String   @default("Asia/Jakarta")
+  color              String?
+  isPrimary          Boolean  @default(false)
+  isSelected         Boolean  @default(true)
+  syncToken          String?
+  lastSyncedAt       DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  googleConnection GoogleConnection? @relation(fields: [googleConnectionId], references: [id], onDelete: SetNull)
+  events           CalendarEvent[]
+
+  @@unique([userId, googleCalendarId])
+  @@index([userId])
+}
+
+enum CalendarEventStatus {
+  PENDING
+  LOGGED
+  IGNORED
+  NON_WORK
+}
+
+model CalendarEvent {
+  id                  String              @id @default(cuid())
+  userId              String
+  calendarId          String
+  googleEventId       String
+  googleCalendarId    String
+  googleEventUpdatedAt DateTime?
+  title               String
+  description         String?             @db.Text
+  location            String?
+  startAt             DateTime
+  endAt               DateTime
+  isAllDay            Boolean             @default(false)
+  htmlLink            String?
+  status              CalendarEventStatus @default(PENDING)
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  calendar   Calendar    @relation(fields: [calendarId], references: [id], onDelete: Cascade)
+  workEntries WorkEntry[]
+
+  @@unique([userId, googleEventId])
+  @@index([userId, startAt])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Clients & projects (§32, §33)
+// ---------------------------------------------------------------------------
+
+enum BillingType {
+  PER_DAY
+  PER_HOUR
+  FIXED
+  CUSTOM
+}
+
+model Client {
+  id             String      @id @default(cuid())
+  userId         String
+  name           String
+  organization   String?
+  contactPerson  String?
+  email          String?
+  phone          String?
+  address        String?     @db.Text
+  defaultRate    Decimal?    @db.Decimal(14, 2)
+  defaultBillingType BillingType @default(PER_DAY)
+  currency       String      @default("IDR")
+  notes          String?     @db.Text
+  isActive       Boolean     @default(true)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  deletedAt      DateTime?
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projects    Project[]
+  workEntries WorkEntry[]
+  invoices    Invoice[]
+  timesheets  Timesheet[]
+  serviceLogs ServiceLog[]
+
+  @@index([userId])
+}
+
+enum ProjectStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  ARCHIVED
+}
+
+model Project {
+  id              String        @id @default(cuid())
+  userId          String
+  clientId        String
+  name            String
+  description     String?       @db.Text
+  startDate       DateTime?
+  endDate         DateTime?
+  status          ProjectStatus @default(ACTIVE)
+  billingType     BillingType   @default(PER_DAY)
+  defaultRate     Decimal?      @db.Decimal(14, 2)
+  hoursPerWorkday Decimal       @default(8) @db.Decimal(5, 2)
+  color           String?
+  notes           String?       @db.Text
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  deletedAt       DateTime?
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  client      Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  workEntries WorkEntry[]
+  invoices    Invoice[]
+  rates       ProjectRate[]
+  timesheets  Timesheet[]
+  serviceLogs ServiceLog[]
+
+  @@index([userId])
+  @@index([clientId])
+}
+
+// Rate history (§75) — a work entry keeps the rate that applied on its date.
+model ProjectRate {
+  id          String      @id @default(cuid())
+  projectId   String
+  billingType BillingType
+  rate        Decimal     @db.Decimal(14, 2)
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+  createdAt   DateTime    @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, effectiveFrom])
+}
+
+// ---------------------------------------------------------------------------
+// Work entries (§13, §14)
+// ---------------------------------------------------------------------------
+
+enum WorkStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  WAITING
+  CANCELLED
+}
+
+enum WorkSource {
+  MANUAL
+  GOOGLE_CALENDAR
+  QUICK_LOG
+}
+
+model WorkEntry {
+  id              String      @id @default(cuid())
+  userId          String
+  clientId        String?
+  projectId       String?
+  calendarEventId String?
+
+  date            DateTime    @db.Date
+  startAt         DateTime?
+  endAt           DateTime?
+  breakMinutes    Int         @default(0)
+  durationMinutes Int         @default(0)
+  dayUnits        Decimal     @default(0) @db.Decimal(6, 3)
+
+  title           String
+  category        String?
+  description     String?     @db.Text
+  output          String?     @db.Text
+  participants    String?
+  notes           String?     @db.Text
+
+  status          WorkStatus  @default(COMPLETED)
+  source          WorkSource  @default(MANUAL)
+
+  billable        Boolean     @default(true)
+  billingType     BillingType @default(PER_DAY)
+  rate            Decimal?    @db.Decimal(14, 2)
+  billableAmount  Decimal?    @db.Decimal(14, 2)
+  invoicedAt      DateTime?
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  deletedAt       DateTime?
+
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  client        Client?          @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  project       Project?         @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  calendarEvent CalendarEvent?   @relation(fields: [calendarEventId], references: [id], onDelete: SetNull)
+  attachments   WorkAttachment[]
+  invoiceItems  InvoiceItem[]
+  serviceLogItems ServiceLogItem[]
+
+  @@index([userId, date])
+  @@index([projectId, date])
+  @@index([clientId, date])
+  @@index([status, billable])
+}
+
+model WorkAttachment {
+  id          String   @id @default(cuid())
+  workEntryId String
+  fileName    String
+  fileUrl     String
+  mimeType    String?
+  sizeBytes   Int?
+  createdAt   DateTime @default(now())
+
+  workEntry WorkEntry @relation(fields: [workEntryId], references: [id], onDelete: Cascade)
+
+  @@index([workEntryId])
+}
+
+// ---------------------------------------------------------------------------
+// Documents: timesheet, service log, invoice (§17, §19, §22, §40)
+// ---------------------------------------------------------------------------
+
+enum DocumentStatus {
+  DRAFT
+  GENERATED
+  FINAL
+}
+
+model Timesheet {
+  id            String         @id @default(cuid())
+  userId        String
+  clientId      String?
+  projectId     String?
+  periodStart   DateTime       @db.Date
+  periodEnd     DateTime       @db.Date
+  status        DocumentStatus @default(DRAFT)
+  totalMinutes  Int            @default(0)
+  totalDayUnits Decimal        @default(0) @db.Decimal(8, 3)
+  totalAmount   Decimal        @default(0) @db.Decimal(14, 2)
+  snapshot      Json?
+  generatedAt   DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  client  Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId, periodStart])
+}
+
+model ServiceLog {
+  id            String         @id @default(cuid())
+  userId        String
+  clientId      String?
+  projectId     String?
+  title         String         @default("Log Penggunaan Jasa")
+  serviceName   String?
+  periodStart   DateTime       @db.Date
+  periodEnd     DateTime       @db.Date
+  preparedBy    String?
+  approvedBy    String?
+  status        DocumentStatus @default(DRAFT)
+  totalMinutes  Int            @default(0)
+  totalDayUnits Decimal        @default(0) @db.Decimal(8, 3)
+  snapshot      Json?
+  generatedAt   DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  client  Client?          @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  project Project?         @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  items   ServiceLogItem[]
+
+  @@index([userId, periodStart])
+}
+
+// Report-specific copy of a work entry (§20) — editing this never touches the
+// original work entry.
+model ServiceLogItem {
+  id              String    @id @default(cuid())
+  serviceLogId    String
+  workEntryId     String?
+  position        Int       @default(0)
+  date            DateTime  @db.Date
+  serviceType     String?
+  description     String?   @db.Text
+  output          String?   @db.Text
+  participants    String?
+  startAt         DateTime?
+  endAt           DateTime?
+  durationMinutes Int       @default(0)
+  status          String?
+  notes           String?   @db.Text
+
+  serviceLog ServiceLog @relation(fields: [serviceLogId], references: [id], onDelete: Cascade)
+  workEntry  WorkEntry? @relation(fields: [workEntryId], references: [id], onDelete: SetNull)
+
+  @@index([serviceLogId])
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  SENT
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+model Invoice {
+  id            String        @id @default(cuid())
+  userId        String
+  clientId      String?
+  projectId     String?
+  templateId    String?
+
+  number        String
+  sequence      Int
+  issueDate     DateTime      @db.Date
+  dueDate       DateTime?     @db.Date
+  periodStart   DateTime      @db.Date
+  periodEnd     DateTime      @db.Date
+  status        InvoiceStatus @default(DRAFT)
+
+  currency      String        @default("IDR")
+  subtotal      Decimal       @default(0) @db.Decimal(14, 2)
+  discount      Decimal       @default(0) @db.Decimal(14, 2)
+  taxRate       Decimal       @default(0) @db.Decimal(5, 2)
+  taxAmount     Decimal       @default(0) @db.Decimal(14, 2)
+  additionalFee Decimal       @default(0) @db.Decimal(14, 2)
+  total         Decimal       @default(0) @db.Decimal(14, 2)
+
+  introText     String?       @db.Text
+  declaration   String?       @db.Text
+  paymentName   String?
+  bankName      String?
+  bankAccount   String?
+  signerName    String?
+  signerTitle   String?
+  notes         String?       @db.Text
+
+  // Payment tracking (§77)
+  paidAt        DateTime?
+  paidAmount    Decimal?      @db.Decimal(14, 2)
+  paymentRef    String?
+
+  issuedAt      DateTime?
+  cancelledAt   DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  client   Client?          @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  project  Project?         @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  template InvoiceTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  items    InvoiceItem[]
+  snapshot InvoiceSnapshot?
+
+  @@unique([userId, number])
+  @@index([userId, status])
+  @@index([clientId])
+}
+
+model InvoiceItem {
+  id          String      @id @default(cuid())
+  invoiceId   String
+  workEntryId String?
+  position    Int         @default(0)
+  description String      @db.Text
+  quantity    Decimal     @default(1) @db.Decimal(10, 3)
+  unit        String      @default("Days")
+  rate        Decimal     @default(0) @db.Decimal(14, 2)
+  amount      Decimal     @default(0) @db.Decimal(14, 2)
+
+  invoice   Invoice    @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  workEntry WorkEntry? @relation(fields: [workEntryId], references: [id], onDelete: SetNull)
+
+  @@index([invoiceId])
+}
+
+// Immutable copy taken at issue time (§29, §85, §86).
+model InvoiceSnapshot {
+  id        String   @id @default(cuid())
+  invoiceId String   @unique
+  data      Json
+  createdAt DateTime @default(now())
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+}
+
+model InvoiceTemplate {
+  id             String   @id @default(cuid())
+  userId         String
+  name           String
+  isDefault      Boolean  @default(false)
+  businessName   String?
+  professionalTitle String?
+  address        String?  @db.Text
+  email          String?
+  phone          String?
+  bankName       String?
+  bankAccount    String?
+  accountHolder  String?
+  declaration    String?  @db.Text
+  paymentTerms   String?  @db.Text
+  defaultRate    Decimal? @db.Decimal(14, 2)
+  currency       String   @default("IDR")
+  logoUrl        String?
+  accentColor    String?
+  layout         Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoices Invoice[]
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// System (§36, §43, §50)
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  body      String?   @db.Text
+  href      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  userId    String
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String
+  action     String
+  entityType String
+  entityId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
